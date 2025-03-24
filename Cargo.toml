@@ -1,0 +1,12 @@
+[package]
+name = "distributed_system_challenges"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = { version = "1.0.140" }
+anyhow = { version = "1.0.97" }
+uuid = { version = "1.16.0", features = ["v4"] }
+log = "0.4.27"
