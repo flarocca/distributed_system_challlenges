@@ -31,9 +31,12 @@
 4. Grow-only Counter
 
 ```shell
-./maelstrom test -w g-counter --bin ../../distributed_system_challenges/target/debug/distributed_system_challenges \
-    --node-count 3 
-    --rate 100 
-    --time-limit 20 
-    --nemesis partition
+./maelstrom test -w g-counter --bin ../../distributed_system_challenges/target/debug/grow_only_counter \
+    --node-count 3 \ 
+    --rate 100 \
+    --time-limit 20 \ 
+    --nemesis partition \
+    --log-stderr \
+    --log-net-send \
+    --log-net-recv
 ```

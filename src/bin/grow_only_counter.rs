@@ -1,11 +1,10 @@
+use anyhow::Context;
+use distributed_system_challenges::{main_loop, Body, Message, Node};
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     io::{StdoutLock, Write},
 };
-
-use anyhow::Context;
-use distributed_system_challenges::{main_loop, Body, Message, Node};
-use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -16,38 +15,36 @@ enum Payload {
         node_ids: Vec<String>,
     },
     InitOk,
-    Broadcast {
-        message: usize,
+    Add {
+        delta: usize,
     },
-    BroadcastOk,
+    AddOk,
     Read,
     ReadOk {
-        messages: HashSet<usize>,
+        value: usize,
     },
-    Topology {
-        topology: HashMap<String, Vec<String>>,
-    },
-    TopologyOk,
     TriggerGossip,
     Gossip {
-        seen: HashSet<usize>,
+        seen: HashMap<usize, usize>,
     },
 }
 
-struct BroadcastNode {
+struct GrowOnlyCounterNode {
     node_id: String,
     message_id: usize,
-    messages: HashSet<usize>,
+    messages: HashMap<usize, usize>,
+    value: usize,
     neighbors: Vec<String>,
     known: HashMap<String, HashSet<usize>>,
 }
 
-impl BroadcastNode {
+impl GrowOnlyCounterNode {
     fn new() -> Self {
         Self {
             node_id: "uninit".to_owned(),
             message_id: 0,
-            messages: HashSet::new(),
+            messages: HashMap::new(),
+            value: 0,
             neighbors: Vec::new(),
             known: HashMap::new(),
         }
@@ -91,8 +88,16 @@ impl BroadcastNode {
         stdout: &mut StdoutLock,
     ) -> anyhow::Result<()> {
         self.node_id = node_id.to_owned();
+
+        let nodes = node_ids
+            .iter()
+            .filter(|n| *n != node_id)
+            .map(|n| n.to_owned())
+            .collect::<Vec<_>>();
+
         self.known
-            .extend(node_ids.iter().map(|id| (id.clone(), HashSet::new())));
+            .extend(nodes.iter().map(|id| (id.clone(), HashSet::new())));
+        self.neighbors = nodes;
 
         let reply = Message::new(
             message.dest().to_owned(),
@@ -103,23 +108,22 @@ impl BroadcastNode {
         self.send_message(stdout, &reply)
     }
 
-    fn handle_broadcast(
+    fn handle_add(
         &mut self,
         message: &Message<Payload>,
-        value: usize,
+        delta: usize,
         stdout: &mut StdoutLock,
     ) -> anyhow::Result<()> {
         let reply = Message::new(
             message.dest().to_owned(),
             message.src().to_owned(),
-            Body::new(
-                Some(self.message_id),
-                message.msg_id(),
-                Payload::BroadcastOk,
-            ),
+            Body::new(Some(self.message_id), message.msg_id(), Payload::AddOk),
         );
 
-        self.messages.insert(value);
+        self.messages
+            .insert(message.msg_id().expect("No message id"), delta);
+        self.value += delta;
+
         self.send_message(stdout, &reply)
     }
 
@@ -134,40 +138,24 @@ impl BroadcastNode {
             Body::new(
                 Some(self.message_id),
                 message.msg_id(),
-                Payload::ReadOk {
-                    messages: self.messages.clone(),
-                },
+                Payload::ReadOk { value: self.value },
             ),
         );
 
         self.send_message(stdout, &reply)
     }
 
-    fn handle_topology(
-        &mut self,
-        message: &Message<Payload>,
-        topology: &HashMap<String, Vec<String>>,
-        stdout: &mut StdoutLock,
-    ) -> anyhow::Result<()> {
-        let reply = Message::new(
-            message.dest().to_owned(),
-            message.src().to_owned(),
-            Body::new(Some(self.message_id), message.msg_id(), Payload::TopologyOk),
-        );
-
-        self.neighbors = topology
-            .get(&self.node_id)
-            .map_or_else(Vec::new, |v| v.clone());
-
-        self.send_message(stdout, &reply)
-    }
-
-    fn handle_gossip(&mut self, src: &str, seen: HashSet<usize>) {
+    fn handle_gossip(&mut self, src: &str, seen: HashMap<usize, usize>) {
         self.known
             .get_mut(src)
             .expect("Unknown node")
-            .extend(seen.iter().copied());
-        self.messages.extend(seen);
+            .extend(seen.keys().copied());
+
+        for (msg_id, value) in seen {
+            if self.messages.insert(msg_id, value).is_none() {
+                self.value += value;
+            }
+        }
     }
 
     fn handle_trigger_gossip(&mut self, stdout: &mut StdoutLock) -> anyhow::Result<()> {
@@ -179,14 +167,15 @@ impl BroadcastNode {
             .neighbors
             .iter()
             .map(|n| {
-                let n_not_seen = self
-                    .messages
-                    .difference(self.known.get(n).expect("Unknown node"))
-                    .copied()
-                    .collect();
+                let mut n_not_seen: HashMap<usize, usize> = HashMap::new();
+                for (msg_id, value) in self.messages.iter() {
+                    if !self.known.get(n).expect("Unknown node").contains(msg_id) {
+                        n_not_seen.insert(*msg_id, *value);
+                    }
+                }
 
                 Message::new(
-                    self.node_id.clone(),
+                    self.node_id.to_owned(),
                     n.to_owned(),
                     Body::new(
                         Some(self.message_id),
@@ -201,7 +190,7 @@ impl BroadcastNode {
     }
 }
 
-impl Node<Payload> for BroadcastNode {
+impl Node<Payload> for GrowOnlyCounterNode {
     fn init(&mut self, tx: std::sync::mpsc::Sender<Message<Payload>>) -> anyhow::Result<()> {
         let node_id = self.node_id.clone();
         let _ = std::thread::spawn(move || loop {
@@ -231,15 +220,11 @@ impl Node<Payload> for BroadcastNode {
                 self.handle_init(&message, node_id, node_ids, stdout)?
             }
             Payload::InitOk => {}
-            Payload::Broadcast { message: value } => {
-                self.handle_broadcast(&message, *value, stdout)?
-            }
+            Payload::Add { delta } => self.handle_add(&message, *delta, stdout)?,
 
-            Payload::BroadcastOk => {}
+            Payload::AddOk => {}
             Payload::Read => self.handle_read(&message, stdout)?,
             Payload::ReadOk { .. } => {}
-            Payload::Topology { topology } => self.handle_topology(&message, topology, stdout)?,
-            Payload::TopologyOk => {}
             Payload::TriggerGossip => self.handle_trigger_gossip(stdout)?,
             Payload::Gossip { seen } => self.handle_gossip(message.src(), seen.clone()),
         };
@@ -249,6 +234,6 @@ impl Node<Payload> for BroadcastNode {
 }
 
 fn main() -> anyhow::Result<()> {
-    let mut node = BroadcastNode::new();
+    let mut node = GrowOnlyCounterNode::new();
     main_loop::<Message<Payload>, _, Payload>(&mut node)
 }

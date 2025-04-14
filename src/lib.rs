@@ -1,5 +1,6 @@
 use anyhow::{bail, Context};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde_json::Value;
 use std::{io::StdoutLock, sync::mpsc::Sender};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,7 +64,7 @@ pub fn main_loop<M, N, P>(node: &mut N) -> anyhow::Result<()>
 where
     M: Serialize + Deserialize<'static>,
     N: Node<P>,
-    P: Serialize + DeserializeOwned + Send + 'static,
+    P: std::fmt::Debug + Serialize + DeserializeOwned + Send + 'static,
 {
     let mut stdout = std::io::stdout().lock();
     let (tx, rx) = std::sync::mpsc::channel();
@@ -74,10 +75,14 @@ where
 
     let reciver_thread = std::thread::spawn(move || {
         let stdin = std::io::stdin().lock();
-        let inputs = serde_json::Deserializer::from_reader(stdin).into_iter::<Message<P>>();
+        let inputs = serde_json::Deserializer::from_reader(stdin).into_iter::<Value>();
 
         for message in inputs {
             let message = message
+                .context("Failed to parse message as Value")
+                .expect("Failed to parse message as Value");
+
+            let message: Message<P> = serde_json::from_value(message)
                 .context("Failed to parse stdin input message")
                 .expect("Failed to parse stdin input message");
 
