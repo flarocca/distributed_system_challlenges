@@ -10,3 +10,4 @@ serde_json = { version = "1.0.140" }
 anyhow = { version = "1.0.97" }
 uuid = { version = "1.16.0", features = ["v4"] }
 log = "0.4.27"
+redis = { version =  "0.29.5" }

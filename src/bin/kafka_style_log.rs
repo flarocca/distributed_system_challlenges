@@ -1,13 +1,11 @@
 use anyhow::Context;
 use distributed_system_challenges::{main_loop, Body, Message, Node};
+use redis::{Commands, Connection};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     io::{StdoutLock, Write},
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
-    },
+    sync::{Arc, Mutex},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,20 +70,20 @@ struct KafkaStyleLogNode {
     message_id: usize,
     neighbors: Vec<String>,
     known: HashMap<String, SeenLogs>,
+    connection: Arc<Mutex<Connection>>,
     // Node specific state
-    offset: AtomicUsize,
     uncommitted_logs: Arc<Mutex<Logs>>,
     committed_logs: Arc<Mutex<Logs>>,
 }
 
 impl KafkaStyleLogNode {
-    fn new() -> Self {
+    fn new(connection: Arc<Mutex<Connection>>) -> Self {
         Self {
             node_id: "uninit".to_owned(),
             message_id: 0,
             neighbors: Vec::new(),
             known: HashMap::new(),
-            offset: AtomicUsize::default(),
+            connection,
             uncommitted_logs: Arc::new(Mutex::new(HashMap::new())),
             committed_logs: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -160,7 +158,12 @@ impl KafkaStyleLogNode {
         // it should return the actual offset
         let cloned = self.uncommitted_logs.clone();
         let mut uncommitted_logs = cloned.lock().unwrap();
-        let offset = self.offset.load(Ordering::Relaxed);
+        //let offset = self.offset.load(Ordering::Relaxed);
+        let offset = self
+            .connection
+            .lock()
+            .unwrap()
+            .incr(format!("{key}::offset"), 1)?;
 
         let log_entry = LogEntry {
             msg_id: self.message_id,
@@ -183,8 +186,6 @@ impl KafkaStyleLogNode {
                 Payload::SendOk { offset },
             ),
         );
-
-        self.offset.fetch_add(1, Ordering::Relaxed);
 
         self.send_message(stdout, &reply)
     }
@@ -447,7 +448,7 @@ impl Node<Payload> for KafkaStyleLogNode {
     fn handle_message(
         &mut self,
         message: Message<Payload>,
-        stdout: &mut StdoutLock,
+        stdout: &mut StdoutLock<'_>,
     ) -> anyhow::Result<()> {
         // TODO: check iof message has been seen already
         match &message.body().payload {
@@ -476,6 +477,12 @@ impl Node<Payload> for KafkaStyleLogNode {
 }
 
 fn main() -> anyhow::Result<()> {
-    let mut node = KafkaStyleLogNode::new();
+    let redis_client =
+        redis::Client::open("redis://localhost/").context("Error connecting to Redis server")?;
+
+    let connection = redis_client.get_connection()?;
+    let connection = Arc::new(Mutex::new(connection));
+
+    let mut node = KafkaStyleLogNode::new(connection);
     main_loop::<Message<Payload>, _, Payload>(&mut node)
 }
