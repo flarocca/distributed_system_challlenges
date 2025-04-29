@@ -1,7 +1,9 @@
 use anyhow::{bail, Context};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
-use std::{io::StdoutLock, sync::mpsc::Sender};
+use std::sync::mpsc::Sender;
+
+pub mod writters;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message<Payload> {
@@ -36,6 +38,7 @@ impl<Payload> Message<Payload> {
 pub struct Body<Payload> {
     msg_id: Option<usize>,
     in_reply_to: Option<usize>,
+
     #[serde(flatten)]
     pub payload: Payload,
 }
@@ -53,11 +56,7 @@ impl<Payload> Body<Payload> {
 pub trait Node<Payload> {
     fn init(&mut self, tx: Sender<Message<Payload>>) -> anyhow::Result<()>;
 
-    fn handle_message(
-        &mut self,
-        message: Message<Payload>,
-        stdout: &mut StdoutLock,
-    ) -> anyhow::Result<()>;
+    fn handle_message(&mut self, message: Message<Payload>) -> anyhow::Result<()>;
 }
 
 pub fn main_loop<M, N, P>(node: &mut N) -> anyhow::Result<()>
@@ -66,7 +65,6 @@ where
     N: Node<P>,
     P: std::fmt::Debug + Serialize + DeserializeOwned + Send + 'static,
 {
-    let mut stdout = std::io::stdout().lock();
     let (tx, rx) = std::sync::mpsc::channel();
 
     let tx_cloned = tx.clone();
@@ -95,7 +93,7 @@ where
     });
 
     for message in rx {
-        node.handle_message(message, &mut stdout)?;
+        node.handle_message(message)?;
     }
 
     reciver_thread

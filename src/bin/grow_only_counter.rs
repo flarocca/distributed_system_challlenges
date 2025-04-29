@@ -210,24 +210,20 @@ impl Node<Payload> for GrowOnlyCounterNode {
         Ok(())
     }
 
-    fn handle_message(
-        &mut self,
-        message: Message<Payload>,
-        stdout: &mut StdoutLock,
-    ) -> anyhow::Result<()> {
-        match &message.body().payload {
-            Payload::Init { node_id, node_ids } => {
-                self.handle_init(&message, node_id, node_ids, stdout)?
-            }
-            Payload::InitOk => {}
-            Payload::Add { delta } => self.handle_add(&message, *delta, stdout)?,
-
-            Payload::AddOk => {}
-            Payload::Read => self.handle_read(&message, stdout)?,
-            Payload::ReadOk { .. } => {}
-            Payload::TriggerGossip => self.handle_trigger_gossip(stdout)?,
-            Payload::Gossip { seen } => self.handle_gossip(message.src(), seen.clone()),
-        };
+    fn handle_message(&mut self, message: Message<Payload>) -> anyhow::Result<()> {
+        //match &message.body().payload {
+        //    Payload::Init { node_id, node_ids } => {
+        //        self.handle_init(&message, node_id, node_ids, stdout)?
+        //    }
+        //    Payload::InitOk => {}
+        //    Payload::Add { delta } => self.handle_add(&message, *delta, stdout)?,
+        //
+        //    Payload::AddOk => {}
+        //    Payload::Read => self.handle_read(&message, stdout)?,
+        //    Payload::ReadOk { .. } => {}
+        //    Payload::TriggerGossip => self.handle_trigger_gossip(stdout)?,
+        //    Payload::Gossip { seen } => self.handle_gossip(message.src(), seen.clone()),
+        //};
 
         Ok(())
     }

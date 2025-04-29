@@ -91,18 +91,14 @@ impl Node<Payload> for EchoNode {
         Ok(())
     }
 
-    fn handle_message(
-        &mut self,
-        message: Message<Payload>,
-        stdout: &mut StdoutLock,
-    ) -> anyhow::Result<()> {
-        match &message.body().payload {
-            Payload::Init { node_id, .. } => self.handle_init(&message, node_id, stdout)?,
-            Payload::InitOk => {}
-            Payload::Echo { echo } => self.handle_echo(&message, echo, stdout)?,
-
-            Payload::EchoOk { .. } => {}
-        };
+    fn handle_message(&mut self, message: Message<Payload>) -> anyhow::Result<()> {
+        //match &message.body().payload {
+        //    Payload::Init { node_id, .. } => self.handle_init(&message, node_id, stdout)?,
+        //    Payload::InitOk => {}
+        //    Payload::Echo { echo } => self.handle_echo(&message, echo, stdout)?,
+        //
+        //    Payload::EchoOk { .. } => {}
+        //};
 
         Ok(())
     }

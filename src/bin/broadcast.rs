@@ -221,28 +221,24 @@ impl Node<Payload> for BroadcastNode {
         Ok(())
     }
 
-    fn handle_message(
-        &mut self,
-        message: Message<Payload>,
-        stdout: &mut StdoutLock,
-    ) -> anyhow::Result<()> {
-        match &message.body().payload {
-            Payload::Init { node_id, node_ids } => {
-                self.handle_init(&message, node_id, node_ids, stdout)?
-            }
-            Payload::InitOk => {}
-            Payload::Broadcast { message: value } => {
-                self.handle_broadcast(&message, *value, stdout)?
-            }
-
-            Payload::BroadcastOk => {}
-            Payload::Read => self.handle_read(&message, stdout)?,
-            Payload::ReadOk { .. } => {}
-            Payload::Topology { topology } => self.handle_topology(&message, topology, stdout)?,
-            Payload::TopologyOk => {}
-            Payload::TriggerGossip => self.handle_trigger_gossip(stdout)?,
-            Payload::Gossip { seen } => self.handle_gossip(message.src(), seen.clone()),
-        };
+    fn handle_message(&mut self, message: Message<Payload>) -> anyhow::Result<()> {
+        //match &message.body().payload {
+        //    Payload::Init { node_id, node_ids } => {
+        //        self.handle_init(&message, node_id, node_ids, stdout)?
+        //    }
+        //    Payload::InitOk => {}
+        //    Payload::Broadcast { message: value } => {
+        //        self.handle_broadcast(&message, *value, stdout)?
+        //    }
+        //
+        //    Payload::BroadcastOk => {}
+        //    Payload::Read => self.handle_read(&message, stdout)?,
+        //    Payload::ReadOk { .. } => {}
+        //    Payload::Topology { topology } => self.handle_topology(&message, topology, stdout)?,
+        //    Payload::TopologyOk => {}
+        //    Payload::TriggerGossip => self.handle_trigger_gossip(stdout)?,
+        //    Payload::Gossip { seen } => self.handle_gossip(message.src(), seen.clone()),
+        //};
 
         Ok(())
     }

@@ -1,10 +1,13 @@
 use anyhow::Context;
-use distributed_system_challenges::{main_loop, Body, Message, Node};
+use distributed_system_challenges::{
+    main_loop,
+    writters::{MessageWritter, StdoutJsonWritter},
+    Body, Message, Node,
+};
 use redis::{Commands, Connection};
 use serde::{Deserialize, Serialize, Serializer};
 use std::{
     collections::{HashMap, HashSet},
-    io::{StdoutLock, Write},
     sync::{Arc, Mutex, MutexGuard},
     time::Duration,
 };
@@ -72,7 +75,8 @@ struct LogEntry {
     seen_by: HashSet<NodeId>,
 }
 
-struct KafkaStyleLogNode {
+struct KafkaStyleLogNode<'a> {
+    writter: &'a mut Box<dyn MessageWritter<Message<Payload>>>,
     node_id: NodeId,
     message_id: usize,
     neighbors: HashSet<NodeId>,
@@ -87,13 +91,17 @@ struct KafkaStyleLogNode {
     anchored_committed_logs: Arc<Mutex<Logs>>,
 }
 
-impl KafkaStyleLogNode {
-    fn new(connection: Arc<Mutex<Connection>>) -> Self {
+impl<'a> KafkaStyleLogNode<'a> {
+    fn new(
+        writter: &'a mut Box<dyn MessageWritter<Message<Payload>>>,
+        connection: Arc<Mutex<Connection>>,
+    ) -> Self {
         Self {
             node_id: "uninit".to_owned(),
             message_id: 0,
             neighbors: HashSet::new(),
             known: HashMap::new(),
+            writter,
             connection,
             gossip_interval: Duration::from_millis(300),
             gossip_batch_size: 100,
@@ -104,31 +112,15 @@ impl KafkaStyleLogNode {
         }
     }
 
-    fn send_message<T>(&mut self, stdout: &mut StdoutLock, message: &T) -> anyhow::Result<()>
-    where
-        T: ?Sized + Serialize + std::fmt::Debug,
-    {
-        serde_json::to_writer(&mut *stdout, message).context("Error serializing response")?;
-        stdout
-            .write_all(b"\n")
-            .context("Error writing response to stdout")?;
-
+    fn send_message(&mut self, message: &Message<Payload>) -> anyhow::Result<()> {
+        self.writter.send_message(message)?;
         self.message_id += 1;
 
         Ok(())
     }
 
-    fn send_messages<T>(&mut self, stdout: &mut StdoutLock, messages: &Vec<T>) -> anyhow::Result<()>
-    where
-        T: Serialize,
-    {
-        for message in messages {
-            serde_json::to_writer(&mut *stdout, message).context("Error serializing response")?;
-            stdout
-                .write_all(b"\n")
-                .context("Error writing response to stdout")?;
-        }
-
+    fn send_messages(&mut self, messages: &[Message<Payload>]) -> anyhow::Result<()> {
+        self.writter.send_messages(messages)?;
         self.message_id += 1;
 
         Ok(())
@@ -139,7 +131,6 @@ impl KafkaStyleLogNode {
         message: &Message<Payload>,
         node_id: &str,
         node_ids: &[String],
-        stdout: &mut StdoutLock,
     ) -> anyhow::Result<()> {
         self.node_id = node_id.to_owned();
 
@@ -159,7 +150,7 @@ impl KafkaStyleLogNode {
             Body::new(None, message.msg_id(), Payload::InitOk),
         );
 
-        self.send_message(stdout, &reply)
+        self.send_message(&reply)
     }
 
     fn handle_send(
@@ -167,7 +158,6 @@ impl KafkaStyleLogNode {
         message: &Message<Payload>,
         key: &str,
         msg: usize,
-        stdout: &mut StdoutLock,
     ) -> anyhow::Result<()> {
         // TODO: handle the case for when the key/msg already exists, in which case
         // it should return the actual offset
@@ -205,14 +195,13 @@ impl KafkaStyleLogNode {
             ),
         );
 
-        self.send_message(stdout, &reply)
+        self.send_message(&reply)
     }
 
     fn handle_poll(
         &mut self,
         message: &Message<Payload>,
         offsets: HashMap<String, usize>,
-        stdout: &mut StdoutLock,
     ) -> anyhow::Result<()> {
         // TODO: non existing keys are ignored. This might not be the best
         // alternative. Maybe an empty vector should be returned instead
@@ -264,14 +253,13 @@ impl KafkaStyleLogNode {
             ),
         );
 
-        self.send_message(stdout, &reply)
+        self.send_message(&reply)
     }
 
     fn handle_commit_offsets(
         &mut self,
         message: &Message<Payload>,
         offsets: HashMap<String, usize>,
-        stdout: &mut StdoutLock,
     ) -> anyhow::Result<()> {
         let committed_cloned = self.committed_logs.clone();
         let uncommitted_cloned = self.uncommitted_logs.clone();
@@ -307,14 +295,13 @@ impl KafkaStyleLogNode {
             ),
         );
 
-        self.send_message(stdout, &reply)
+        self.send_message(&reply)
     }
 
     fn handle_list_committed_offsets(
         &mut self,
         message: &Message<Payload>,
         keys: &Vec<KeyId>,
-        stdout: &mut StdoutLock,
     ) -> anyhow::Result<()> {
         let committed_cloned = self.committed_logs.clone();
 
@@ -340,7 +327,7 @@ impl KafkaStyleLogNode {
             ),
         );
 
-        self.send_message(stdout, &reply)
+        self.send_message(&reply)
     }
 
     fn handle_gossip(&mut self, src: &str, seen: SeenLogs) -> anyhow::Result<()> {
@@ -382,7 +369,7 @@ impl KafkaStyleLogNode {
         self.anchor_messages(&mut uncommitted_logs)
     }
 
-    fn handle_trigger_gossip(&mut self, stdout: &mut StdoutLock) -> anyhow::Result<()> {
+    fn handle_trigger_gossip(&mut self) -> anyhow::Result<()> {
         if self.neighbors.is_empty() {
             return Ok(());
         }
@@ -501,7 +488,7 @@ impl KafkaStyleLogNode {
         }
 
         if !messages.is_empty() {
-            return self.send_messages(stdout, &messages);
+            return self.send_messages(&messages);
         }
 
         Ok(())
@@ -511,9 +498,7 @@ impl KafkaStyleLogNode {
         let uncommitted_cloned = self.uncommitted_logs.clone();
         let mut uncommitted_logs = uncommitted_cloned.lock().unwrap();
 
-        let result = self.anchor_messages(&mut uncommitted_logs);
-
-        result
+        self.anchor_messages(&mut uncommitted_logs)
     }
 
     fn anchor_messages(&mut self, uncommitted_logs: &mut MutexGuard<Logs>) -> anyhow::Result<()> {
@@ -540,7 +525,7 @@ impl KafkaStyleLogNode {
     }
 }
 
-impl Node<Payload> for KafkaStyleLogNode {
+impl Node<Payload> for KafkaStyleLogNode<'_> {
     fn init(&mut self, tx: std::sync::mpsc::Sender<Message<Payload>>) -> anyhow::Result<()> {
         let node_id = self.node_id.clone();
         let gossip_interval = self.gossip_interval;
@@ -571,30 +556,24 @@ impl Node<Payload> for KafkaStyleLogNode {
         Ok(())
     }
 
-    fn handle_message(
-        &mut self,
-        message: Message<Payload>,
-        stdout: &mut StdoutLock<'_>,
-    ) -> anyhow::Result<()> {
+    fn handle_message(&mut self, message: Message<Payload>) -> anyhow::Result<()> {
         // TODO: check iof message has been seen already
         match &message.body().payload {
-            Payload::Init { node_id, node_ids } => {
-                self.handle_init(&message, node_id, node_ids, stdout)?
-            }
+            Payload::Init { node_id, node_ids } => self.handle_init(&message, node_id, node_ids)?,
             Payload::InitOk => {}
-            Payload::Send { key, msg } => self.handle_send(&message, key, *msg, stdout)?,
+            Payload::Send { key, msg } => self.handle_send(&message, key, *msg)?,
             Payload::SendOk { .. } => {}
-            Payload::Poll { offsets } => self.handle_poll(&message, offsets.clone(), stdout)?,
+            Payload::Poll { offsets } => self.handle_poll(&message, offsets.clone())?,
             Payload::PollOk { .. } => {}
             Payload::CommitOffsets { offsets } => {
-                self.handle_commit_offsets(&message, offsets.clone(), stdout)?
+                self.handle_commit_offsets(&message, offsets.clone())?
             }
             Payload::CommitOffsetsOk => {}
             Payload::ListCommittedOffsets { keys } => {
-                self.handle_list_committed_offsets(&message, keys, stdout)?
+                self.handle_list_committed_offsets(&message, keys)?
             }
             Payload::ListCommittedOffsetsOk { .. } => {}
-            Payload::TriggerGossip => self.handle_trigger_gossip(stdout)?,
+            Payload::TriggerGossip => self.handle_trigger_gossip()?,
             Payload::Gossip { seen } => self.handle_gossip(message.src(), seen.clone())?,
             Payload::Anchor => self.handle_anchor()?,
         };
@@ -610,7 +589,11 @@ fn main() -> anyhow::Result<()> {
     let connection = redis_client.get_connection()?;
     let connection = Arc::new(Mutex::new(connection));
 
-    let mut node = KafkaStyleLogNode::new(connection);
+    let stdout = std::io::stdout().lock();
+    let mut stdout_json_writter: Box<dyn MessageWritter<Message<Payload>>> =
+        Box::new(StdoutJsonWritter::new(stdout));
+
+    let mut node = KafkaStyleLogNode::new(&mut stdout_json_writter, connection);
     main_loop::<Message<Payload>, _, Payload>(&mut node)
 }
 

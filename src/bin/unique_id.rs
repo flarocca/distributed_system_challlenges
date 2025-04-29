@@ -87,18 +87,14 @@ impl Node<Payload> for UniqueIdNode {
         Ok(())
     }
 
-    fn handle_message(
-        &mut self,
-        message: Message<Payload>,
-        stdout: &mut StdoutLock,
-    ) -> anyhow::Result<()> {
-        match &message.body().payload {
-            Payload::Init { node_id, .. } => self.handle_init(&message, node_id, stdout)?,
-            Payload::InitOk => {}
-            Payload::Generate => self.handle_generate(&message, stdout)?,
-
-            Payload::GenerateOk { .. } => {}
-        };
+    fn handle_message(&mut self, message: Message<Payload>) -> anyhow::Result<()> {
+        //match &message.body().payload {
+        //    Payload::Init { node_id, .. } => self.handle_init(&message, node_id, stdout)?,
+        //    Payload::InitOk => {}
+        //    Payload::Generate => self.handle_generate(&message, stdout)?,
+        //
+        //    Payload::GenerateOk { .. } => {}
+        //};
 
         Ok(())
     }
