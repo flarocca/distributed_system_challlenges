@@ -22,33 +22,37 @@ enum Payload {
     },
     InitOk,
     Send {
-        key: String,
+        key: KeyId,
         msg: usize,
     },
     SendOk {
         offset: Offset,
     },
     Poll {
-        offsets: HashMap<String, Offset>,
+        offsets: HashMap<KeyId, Offset>,
     },
     PollOk {
         #[serde(serialize_with = "serialize_as_pairs")]
-        msgs: HashMap<String, HashMap<Offset, usize>>,
+        msgs: HashMap<KeyId, HashMap<Offset, usize>>,
     },
     CommitOffsets {
-        offsets: HashMap<String, Offset>,
+        offsets: HashMap<KeyId, Offset>,
     },
     CommitOffsetsOk,
     ListCommittedOffsets {
-        keys: Vec<String>,
+        keys: Vec<KeyId>,
     },
     ListCommittedOffsetsOk {
-        offsets: HashMap<String, Offset>,
+        offsets: HashMap<KeyId, Offset>,
     },
     TriggerGossip,
     Gossip {
         seen: SeenLogs,
     },
+    //GossipOk {
+    //    committed_offsets: HashMap<KeyId, Vec<Offset>>,
+    //    uncommitted_offsets: HashMap<KeyId, Vec<Offset>>,
+    //},
     Anchor,
 }
 
@@ -139,6 +143,8 @@ impl LogStore {
         offset: usize,
         msg: usize,
     ) -> anyhow::Result<()> {
+        eprintln!("[{}] Append - Key: {} | Offset: {}", self.src, key, offset);
+
         let mut seen_by = HashSet::new();
         seen_by.insert(self.src.to_owned());
 
@@ -160,6 +166,8 @@ impl LogStore {
 
     fn commit(&mut self, offsets: HashMap<String, usize>) -> anyhow::Result<()> {
         for (key, offset) in offsets {
+            eprintln!("[{}] Commit - Key: {} | Offset: {}", self.src, key, offset);
+
             let Some(entries) = self.uncommitted_logs.get_mut(&key) else {
                 continue;
             };
@@ -199,6 +207,7 @@ struct KafkaStyleLogNode<'a> {
     writter: &'a mut Box<dyn MessageWritter<Message<Payload>>>,
     node_id: NodeId,
     message_id: usize,
+    cluster: HashSet<NodeId>,
     neighbors: HashSet<NodeId>,
     known: HashMap<NodeId, SeenLogs>,
     connection: Arc<Mutex<Connection>>,
@@ -219,12 +228,13 @@ impl<'a> KafkaStyleLogNode<'a> {
         Self {
             node_id: node_id.to_owned(),
             message_id: 0,
+            cluster: HashSet::new(),
             neighbors: HashSet::new(),
             known: HashMap::new(),
             writter,
             connection,
-            gossip_interval: Duration::from_millis(300),
-            gossip_batch_size: 100,
+            gossip_interval: Duration::from_millis(100),
+            gossip_batch_size: 200,
             log_store: Arc::new(Mutex::new(LogStore::new(node_id))),
             anchored_uncommitted_logs: Arc::new(Mutex::new(HashMap::new())),
             anchored_committed_logs: Arc::new(Mutex::new(HashMap::new())),
@@ -258,10 +268,13 @@ impl<'a> KafkaStyleLogNode<'a> {
             .filter(|n| *n != node_id)
             .map(|n| n.to_owned())
             .collect::<HashSet<_>>();
+        let mut cluster = nodes.clone();
+        cluster.insert(node_id.to_owned());
 
         self.known
             .extend(nodes.iter().map(|id| (id.clone(), SeenLogs::default())));
         self.neighbors = nodes;
+        self.cluster = cluster;
         self.log_store.lock().unwrap().init(node_id);
 
         let reply = Message::new(
@@ -396,7 +409,85 @@ impl<'a> KafkaStyleLogNode<'a> {
         log_store.append_uncommitted(&seen.uncommitted);
 
         self.anchor_messages(&mut log_store)
+        //let committed_offsets = seen
+        //    .committed
+        //    .iter()
+        //    .map(|(key, entries)| {
+        //        let offsets = entries
+        //            .iter()
+        //            .map(|entry| entry.offset)
+        //            .collect::<Vec<usize>>();
+        //
+        //        (key.to_owned(), offsets)
+        //    })
+        //    .collect::<HashMap<KeyId, Vec<Offset>>>();
+        //
+        //let uncommitted_offsets = seen
+        //    .uncommitted
+        //    .iter()
+        //    .map(|(key, entries)| {
+        //        let offsets = entries
+        //            .iter()
+        //            .map(|entry| entry.offset)
+        //            .collect::<Vec<usize>>();
+        //
+        //        (key.to_owned(), offsets)
+        //    })
+        //    .collect::<HashMap<KeyId, Vec<Offset>>>();
+        //
+        //let reply = Message::new(
+        //    self.node_id.to_owned(),
+        //    src.to_owned(),
+        //    Body::new(
+        //        Some(self.message_id),
+        //        None,
+        //        Payload::GossipOk {
+        //            committed_offsets,
+        //            uncommitted_offsets,
+        //        },
+        //    ),
+        //);
+        //
+        //self.send_message(&reply)
     }
+
+    //fn handle_gossip_ok(
+    //    &mut self,
+    //    message: &Message<Payload>,
+    //    committed_offsets: &HashMap<KeyId, Vec<Offset>>,
+    //    uncommitted_offsets: &HashMap<KeyId, Vec<Offset>>,
+    //) -> anyhow::Result<()> {
+    //    let cloned_log_store = self.log_store.clone();
+    //    let mut log_store = cloned_log_store.lock().unwrap();
+    //
+    //    for (key, offsets) in uncommitted_offsets {
+    //        let entries = log_store
+    //            .uncommitted_logs
+    //            .get_mut(key)
+    //            .expect("Key not found");
+    //
+    //        for offset in offsets {
+    //            if let Some(entry) = entries.iter_mut().find(|e| e.offset == *offset) {
+    //                entry.seen_by.insert(message.src().to_owned());
+    //            }
+    //        }
+    //    }
+    //
+    //    for (key, offsets) in committed_offsets {
+    //        let entries = log_store
+    //            .committed_logs
+    //            .get_mut(key)
+    //            .expect("Key not found");
+    //
+    //        for offset in offsets {
+    //            if let Some(entry) = entries.iter_mut().find(|e| e.offset == *offset) {
+    //                entry.seen_by.insert(message.src().to_owned());
+    //            }
+    //        }
+    //    }
+    //
+    //    self.anchor_messages(&mut log_store)
+    //}
 
     fn handle_trigger_gossip(&mut self) -> anyhow::Result<()> {
         if self.neighbors.is_empty() {
@@ -529,25 +620,36 @@ impl<'a> KafkaStyleLogNode<'a> {
     fn handle_anchor(&mut self) -> anyhow::Result<()> {
         let cloned_log_store = self.log_store.clone();
         let mut log_store = cloned_log_store.lock().unwrap();
-
         self.anchor_messages(&mut log_store)
     }
 
     fn anchor_messages(&mut self, log_store: &mut MutexGuard<LogStore>) -> anyhow::Result<()> {
         let mut anchored_uncommitted_logs = self.anchored_uncommitted_logs.lock().unwrap();
-
-        let mut cluster = self.neighbors.clone();
-        cluster.insert(self.node_id.to_owned());
+        let mut anchored_committed_logs = self.anchored_committed_logs.lock().unwrap();
 
         for (key, entries) in log_store.uncommitted_logs.iter_mut() {
             let anchor_entries = entries
                 .iter()
-                .filter(|entry| entry.seen_by == cluster)
+                .filter(|entry| entry.seen_by == self.cluster)
                 .cloned()
                 .collect::<Vec<_>>();
 
-            entries.retain(|entry| entry.seen_by != cluster);
+            entries.retain(|entry| entry.seen_by != self.cluster);
             anchored_uncommitted_logs
+                .entry(key.to_owned())
+                .or_default()
+                .extend(anchor_entries);
+        }
+
+        for (key, entries) in log_store.committed_logs.iter_mut() {
+            let anchor_entries = entries
+                .iter()
+                .filter(|entry| entry.seen_by == self.cluster)
+                .cloned()
+                .collect::<Vec<_>>();
+
+            entries.retain(|entry| entry.seen_by != self.cluster);
+            anchored_committed_logs
                 .entry(key.to_owned())
                 .or_default()
                 .extend(anchor_entries);
@@ -622,6 +724,10 @@ impl Node<Payload> for KafkaStyleLogNode<'_> {
             Payload::ListCommittedOffsetsOk { .. } => {}
             Payload::TriggerGossip => self.handle_trigger_gossip()?,
             Payload::Gossip { seen } => self.handle_gossip(message.src(), seen.clone())?,
+            //Payload::GossipOk {
+            //    uncommitted_offsets,
+            //    committed_offsets,
+            //} => self.handle_gossip_ok(&message, committed_offsets, uncommitted_offsets)?,
             Payload::Anchor => self.handle_anchor()?,
         };
 
