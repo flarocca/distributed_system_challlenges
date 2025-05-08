@@ -35,17 +35,14 @@
     --node-count 3 \
     --rate 100 \
     --time-limit 20 \
-    --nemesis partition \
-    --log-stderr \
-    --log-net-send \
-    --log-net-recv
+    --nemesis partition
 ```
 
 5. Kafka-style Log
 
 ```shell
 ./maelstrom test -w kafka --bin ../../distributed_system_challenges/target/debug/kafka_style_log \
-    --node-count 1 \
+    --node-count 5 \
     --concurrency 2n \
     --time-limit 20 \
     --rate 1000
