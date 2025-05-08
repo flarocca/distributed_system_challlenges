@@ -1,10 +1,10 @@
-use std::{
-    collections::{HashMap, HashSet},
-    io::{StdoutLock, Write},
-};
+use std::collections::{HashMap, HashSet};
 
-use anyhow::Context;
-use distributed_system_challenges::{main_loop, Body, Message, Node};
+use distributed_system_challenges::{
+    main_loop,
+    writters::{MessageWritter, StdoutJsonWritter},
+    Body, Message, Node,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,7 +34,8 @@ enum Payload {
     },
 }
 
-struct BroadcastNode {
+struct BroadcastNode<'a> {
+    writter: &'a mut Box<dyn MessageWritter<Message<Payload>>>,
     node_id: String,
     message_id: usize,
     messages: HashSet<usize>,
@@ -42,9 +43,10 @@ struct BroadcastNode {
     known: HashMap<String, HashSet<usize>>,
 }
 
-impl BroadcastNode {
-    fn new() -> Self {
+impl<'a> BroadcastNode<'a> {
+    fn new(writter: &'a mut Box<dyn MessageWritter<Message<Payload>>>) -> Self {
         Self {
+            writter,
             node_id: "uninit".to_owned(),
             message_id: 0,
             messages: HashSet::new(),
@@ -53,31 +55,15 @@ impl BroadcastNode {
         }
     }
 
-    fn send_message<T>(&mut self, stdout: &mut StdoutLock, message: &T) -> anyhow::Result<()>
-    where
-        T: ?Sized + Serialize,
-    {
-        serde_json::to_writer(&mut *stdout, message).context("Error serializing response")?;
-        stdout
-            .write_all(b"\n")
-            .context("Error writing response to stdout")?;
-
+    fn send_message(&mut self, message: &Message<Payload>) -> anyhow::Result<()> {
+        self.writter.send_message(message)?;
         self.message_id += 1;
 
         Ok(())
     }
 
-    fn send_messages<T>(&mut self, stdout: &mut StdoutLock, messages: &Vec<T>) -> anyhow::Result<()>
-    where
-        T: Serialize,
-    {
-        for message in messages {
-            serde_json::to_writer(&mut *stdout, message).context("Error serializing response")?;
-            stdout
-                .write_all(b"\n")
-                .context("Error writing response to stdout")?;
-        }
-
+    fn send_messages(&mut self, messages: &[Message<Payload>]) -> anyhow::Result<()> {
+        self.writter.send_messages(messages)?;
         self.message_id += 1;
 
         Ok(())
@@ -88,7 +74,6 @@ impl BroadcastNode {
         message: &Message<Payload>,
         node_id: &str,
         node_ids: &[String],
-        stdout: &mut StdoutLock,
     ) -> anyhow::Result<()> {
         self.node_id = node_id.to_owned();
         self.known
@@ -100,15 +85,10 @@ impl BroadcastNode {
             Body::new(None, message.msg_id(), Payload::InitOk),
         );
 
-        self.send_message(stdout, &reply)
+        self.send_message(&reply)
     }
 
-    fn handle_broadcast(
-        &mut self,
-        message: &Message<Payload>,
-        value: usize,
-        stdout: &mut StdoutLock,
-    ) -> anyhow::Result<()> {
+    fn handle_broadcast(&mut self, message: &Message<Payload>, value: usize) -> anyhow::Result<()> {
         let reply = Message::new(
             message.dest().to_owned(),
             message.src().to_owned(),
@@ -120,14 +100,10 @@ impl BroadcastNode {
         );
 
         self.messages.insert(value);
-        self.send_message(stdout, &reply)
+        self.send_message(&reply)
     }
 
-    fn handle_read(
-        &mut self,
-        message: &Message<Payload>,
-        stdout: &mut StdoutLock,
-    ) -> anyhow::Result<()> {
+    fn handle_read(&mut self, message: &Message<Payload>) -> anyhow::Result<()> {
         let reply = Message::new(
             message.dest().to_owned(),
             message.src().to_owned(),
@@ -140,14 +116,13 @@ impl BroadcastNode {
             ),
         );
 
-        self.send_message(stdout, &reply)
+        self.send_message(&reply)
     }
 
     fn handle_topology(
         &mut self,
         message: &Message<Payload>,
         topology: &HashMap<String, Vec<String>>,
-        stdout: &mut StdoutLock,
     ) -> anyhow::Result<()> {
         let reply = Message::new(
             message.dest().to_owned(),
@@ -159,7 +134,7 @@ impl BroadcastNode {
             .get(&self.node_id)
             .map_or_else(Vec::new, |v| v.clone());
 
-        self.send_message(stdout, &reply)
+        self.send_message(&reply)
     }
 
     fn handle_gossip(&mut self, src: &str, seen: HashSet<usize>) {
@@ -170,7 +145,7 @@ impl BroadcastNode {
         self.messages.extend(seen);
     }
 
-    fn handle_trigger_gossip(&mut self, stdout: &mut StdoutLock) -> anyhow::Result<()> {
+    fn handle_trigger_gossip(&mut self) -> anyhow::Result<()> {
         if self.neighbors.is_empty() {
             return Ok(());
         }
@@ -197,11 +172,11 @@ impl BroadcastNode {
             })
             .collect::<Vec<_>>();
 
-        self.send_messages(stdout, &messages)
+        self.send_messages(&messages)
     }
 }
 
-impl Node<Payload> for BroadcastNode {
+impl Node<Payload> for BroadcastNode<'_> {
     fn init(&mut self, tx: std::sync::mpsc::Sender<Message<Payload>>) -> anyhow::Result<()> {
         let node_id = self.node_id.clone();
         let _ = std::thread::spawn(move || loop {
@@ -222,29 +197,29 @@ impl Node<Payload> for BroadcastNode {
     }
 
     fn handle_message(&mut self, message: Message<Payload>) -> anyhow::Result<()> {
-        //match &message.body().payload {
-        //    Payload::Init { node_id, node_ids } => {
-        //        self.handle_init(&message, node_id, node_ids, stdout)?
-        //    }
-        //    Payload::InitOk => {}
-        //    Payload::Broadcast { message: value } => {
-        //        self.handle_broadcast(&message, *value, stdout)?
-        //    }
-        //
-        //    Payload::BroadcastOk => {}
-        //    Payload::Read => self.handle_read(&message, stdout)?,
-        //    Payload::ReadOk { .. } => {}
-        //    Payload::Topology { topology } => self.handle_topology(&message, topology, stdout)?,
-        //    Payload::TopologyOk => {}
-        //    Payload::TriggerGossip => self.handle_trigger_gossip(stdout)?,
-        //    Payload::Gossip { seen } => self.handle_gossip(message.src(), seen.clone()),
-        //};
+        match &message.body().payload {
+            Payload::Init { node_id, node_ids } => self.handle_init(&message, node_id, node_ids)?,
+            Payload::InitOk => {}
+            Payload::Broadcast { message: value } => self.handle_broadcast(&message, *value)?,
+
+            Payload::BroadcastOk => {}
+            Payload::Read => self.handle_read(&message)?,
+            Payload::ReadOk { .. } => {}
+            Payload::Topology { topology } => self.handle_topology(&message, topology)?,
+            Payload::TopologyOk => {}
+            Payload::TriggerGossip => self.handle_trigger_gossip()?,
+            Payload::Gossip { seen } => self.handle_gossip(message.src(), seen.clone()),
+        };
 
         Ok(())
     }
 }
 
 fn main() -> anyhow::Result<()> {
-    let mut node = BroadcastNode::new();
+    let stdout = std::io::stdout().lock();
+    let mut stdout_json_writter: Box<dyn MessageWritter<Message<Payload>>> =
+        Box::new(StdoutJsonWritter::new(stdout));
+
+    let mut node = BroadcastNode::new(&mut stdout_json_writter);
     main_loop::<Message<Payload>, _, Payload>(&mut node)
 }
