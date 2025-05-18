@@ -1,10 +1,10 @@
-use anyhow::Context;
-use distributed_system_challenges::{main_loop, Body, Message, Node};
-use serde::{Deserialize, Serialize};
-use std::{
-    collections::{HashMap, HashSet},
-    io::{StdoutLock, Write},
+use distributed_system_challenges::{
+    main_loop,
+    writters::{MessageWritter, StdoutJsonWritter},
+    Body, Message, Node,
 };
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -29,7 +29,8 @@ enum Payload {
     },
 }
 
-struct GrowOnlyCounterNode {
+struct GrowOnlyCounterNode<'a> {
+    writter: &'a mut Box<dyn MessageWritter<Message<Payload>>>,
     node_id: String,
     message_id: usize,
     messages: HashMap<usize, usize>,
@@ -38,9 +39,10 @@ struct GrowOnlyCounterNode {
     known: HashMap<String, HashSet<usize>>,
 }
 
-impl GrowOnlyCounterNode {
-    fn new() -> Self {
+impl<'a> GrowOnlyCounterNode<'a> {
+    fn new(writter: &'a mut Box<dyn MessageWritter<Message<Payload>>>) -> Self {
         Self {
+            writter,
             node_id: "uninit".to_owned(),
             message_id: 0,
             messages: HashMap::new(),
@@ -50,31 +52,15 @@ impl GrowOnlyCounterNode {
         }
     }
 
-    fn send_message<T>(&mut self, stdout: &mut StdoutLock, message: &T) -> anyhow::Result<()>
-    where
-        T: ?Sized + Serialize,
-    {
-        serde_json::to_writer(&mut *stdout, message).context("Error serializing response")?;
-        stdout
-            .write_all(b"\n")
-            .context("Error writing response to stdout")?;
-
+    fn send_message(&mut self, message: &Message<Payload>) -> anyhow::Result<()> {
+        self.writter.send_message(message)?;
         self.message_id += 1;
 
         Ok(())
     }
 
-    fn send_messages<T>(&mut self, stdout: &mut StdoutLock, messages: &Vec<T>) -> anyhow::Result<()>
-    where
-        T: Serialize,
-    {
-        for message in messages {
-            serde_json::to_writer(&mut *stdout, message).context("Error serializing response")?;
-            stdout
-                .write_all(b"\n")
-                .context("Error writing response to stdout")?;
-        }
-
+    fn send_messages(&mut self, messages: &[Message<Payload>]) -> anyhow::Result<()> {
+        self.writter.send_messages(messages)?;
         self.message_id += 1;
 
         Ok(())
@@ -85,7 +71,6 @@ impl GrowOnlyCounterNode {
         message: &Message<Payload>,
         node_id: &str,
         node_ids: &[String],
-        stdout: &mut StdoutLock,
     ) -> anyhow::Result<()> {
         self.node_id = node_id.to_owned();
 
@@ -105,15 +90,10 @@ impl GrowOnlyCounterNode {
             Body::new(None, message.msg_id(), Payload::InitOk),
         );
 
-        self.send_message(stdout, &reply)
+        self.send_message(&reply)
     }
 
-    fn handle_add(
-        &mut self,
-        message: &Message<Payload>,
-        delta: usize,
-        stdout: &mut StdoutLock,
-    ) -> anyhow::Result<()> {
+    fn handle_add(&mut self, message: &Message<Payload>, delta: usize) -> anyhow::Result<()> {
         let reply = Message::new(
             message.dest().to_owned(),
             message.src().to_owned(),
@@ -124,14 +104,10 @@ impl GrowOnlyCounterNode {
             .insert(message.msg_id().expect("No message id"), delta);
         self.value += delta;
 
-        self.send_message(stdout, &reply)
+        self.send_message(&reply)
     }
 
-    fn handle_read(
-        &mut self,
-        message: &Message<Payload>,
-        stdout: &mut StdoutLock,
-    ) -> anyhow::Result<()> {
+    fn handle_read(&mut self, message: &Message<Payload>) -> anyhow::Result<()> {
         let reply = Message::new(
             message.dest().to_owned(),
             message.src().to_owned(),
@@ -142,10 +118,10 @@ impl GrowOnlyCounterNode {
             ),
         );
 
-        self.send_message(stdout, &reply)
+        self.send_message(&reply)
     }
 
-    fn handle_gossip(&mut self, src: &str, seen: HashMap<usize, usize>) {
+    fn handle_gossip(&mut self, src: &str, seen: HashMap<usize, usize>) -> anyhow::Result<()> {
         self.known
             .get_mut(src)
             .expect("Unknown node")
@@ -156,9 +132,11 @@ impl GrowOnlyCounterNode {
                 self.value += value;
             }
         }
+
+        Ok(())
     }
 
-    fn handle_trigger_gossip(&mut self, stdout: &mut StdoutLock) -> anyhow::Result<()> {
+    fn handle_trigger_gossip(&mut self) -> anyhow::Result<()> {
         if self.neighbors.is_empty() {
             return Ok(());
         }
@@ -186,11 +164,11 @@ impl GrowOnlyCounterNode {
             })
             .collect::<Vec<_>>();
 
-        self.send_messages(stdout, &messages)
+        self.send_messages(&messages)
     }
 }
 
-impl Node<Payload> for GrowOnlyCounterNode {
+impl Node<Payload> for GrowOnlyCounterNode<'_> {
     fn init(&mut self, tx: std::sync::mpsc::Sender<Message<Payload>>) -> anyhow::Result<()> {
         let node_id = self.node_id.clone();
         let _ = std::thread::spawn(move || loop {
@@ -211,25 +189,24 @@ impl Node<Payload> for GrowOnlyCounterNode {
     }
 
     fn handle_message(&mut self, message: Message<Payload>) -> anyhow::Result<()> {
-        //match &message.body().payload {
-        //    Payload::Init { node_id, node_ids } => {
-        //        self.handle_init(&message, node_id, node_ids, stdout)?
-        //    }
-        //    Payload::InitOk => {}
-        //    Payload::Add { delta } => self.handle_add(&message, *delta, stdout)?,
-        //
-        //    Payload::AddOk => {}
-        //    Payload::Read => self.handle_read(&message, stdout)?,
-        //    Payload::ReadOk { .. } => {}
-        //    Payload::TriggerGossip => self.handle_trigger_gossip(stdout)?,
-        //    Payload::Gossip { seen } => self.handle_gossip(message.src(), seen.clone()),
-        //};
-
-        Ok(())
+        match &message.body().payload {
+            Payload::Init { node_id, node_ids } => self.handle_init(&message, node_id, node_ids),
+            Payload::InitOk => Ok(()),
+            Payload::Add { delta } => self.handle_add(&message, *delta),
+            Payload::AddOk => Ok(()),
+            Payload::Read => self.handle_read(&message),
+            Payload::ReadOk { .. } => Ok(()),
+            Payload::TriggerGossip => self.handle_trigger_gossip(),
+            Payload::Gossip { seen } => self.handle_gossip(message.src(), seen.clone()),
+        }
     }
 }
 
 fn main() -> anyhow::Result<()> {
-    let mut node = GrowOnlyCounterNode::new();
+    let stdout = std::io::stdout().lock();
+    let mut stdout_json_writter: Box<dyn MessageWritter<Message<Payload>>> =
+        Box::new(StdoutJsonWritter::new(stdout));
+
+    let mut node = GrowOnlyCounterNode::new(&mut stdout_json_writter);
     main_loop::<Message<Payload>, _, Payload>(&mut node)
 }

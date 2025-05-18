@@ -1,7 +1,9 @@
-use anyhow::Context;
-use distributed_system_challenges::{main_loop, Body, Message, Node};
+use distributed_system_challenges::{
+    main_loop,
+    writters::{MessageWritter, StdoutJsonWritter},
+    Body, Message, Node,
+};
 use serde::{Deserialize, Serialize};
-use std::io::{StdoutLock, Write};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -20,39 +22,29 @@ enum Payload {
     },
 }
 
-struct EchoNode {
+struct EchoNode<'a> {
+    writter: &'a mut Box<dyn MessageWritter<Message<Payload>>>,
     node_id: String,
     message_id: usize,
 }
 
-impl EchoNode {
-    fn new() -> Self {
+impl<'a> EchoNode<'a> {
+    fn new(writter: &'a mut Box<dyn MessageWritter<Message<Payload>>>) -> Self {
         Self {
+            writter,
             node_id: "uninit".to_owned(),
             message_id: 0,
         }
     }
 
-    fn send_message<T>(&mut self, stdout: &mut StdoutLock, message: &T) -> anyhow::Result<()>
-    where
-        T: ?Sized + Serialize,
-    {
-        serde_json::to_writer(&mut *stdout, message).context("Error serializing response")?;
-        stdout
-            .write_all(b"\n")
-            .context("Error writing response to stdout")?;
-
+    fn send_message(&mut self, message: &Message<Payload>) -> anyhow::Result<()> {
+        self.writter.send_message(message)?;
         self.message_id += 1;
 
         Ok(())
     }
 
-    fn handle_init(
-        &mut self,
-        message: &Message<Payload>,
-        node_id: &str,
-        stdout: &mut StdoutLock,
-    ) -> anyhow::Result<()> {
+    fn handle_init(&mut self, message: &Message<Payload>, node_id: &str) -> anyhow::Result<()> {
         self.node_id = node_id.to_owned();
 
         let reply = Message::new(
@@ -61,15 +53,10 @@ impl EchoNode {
             Body::new(None, message.msg_id(), Payload::InitOk),
         );
 
-        self.send_message(stdout, &reply)
+        self.send_message(&reply)
     }
 
-    fn handle_echo(
-        &mut self,
-        message: &Message<Payload>,
-        echo: &str,
-        stdout: &mut StdoutLock,
-    ) -> anyhow::Result<()> {
+    fn handle_echo(&mut self, message: &Message<Payload>, echo: &str) -> anyhow::Result<()> {
         let reply = Message::new(
             message.dest().to_owned(),
             message.src().to_owned(),
@@ -82,29 +69,33 @@ impl EchoNode {
             ),
         );
 
-        self.send_message(stdout, &reply)
+        self.send_message(&reply)
     }
 }
 
-impl Node<Payload> for EchoNode {
-    fn init(&mut self, _: std::sync::mpsc::Sender<Message<Payload>>) -> anyhow::Result<()> {
+impl Node<Payload> for EchoNode<'_> {
+    fn init(&mut self, _tx: std::sync::mpsc::Sender<Message<Payload>>) -> anyhow::Result<()> {
         Ok(())
     }
 
     fn handle_message(&mut self, message: Message<Payload>) -> anyhow::Result<()> {
-        //match &message.body().payload {
-        //    Payload::Init { node_id, .. } => self.handle_init(&message, node_id, stdout)?,
-        //    Payload::InitOk => {}
-        //    Payload::Echo { echo } => self.handle_echo(&message, echo, stdout)?,
-        //
-        //    Payload::EchoOk { .. } => {}
-        //};
+        match &message.body().payload {
+            Payload::Init { node_id, .. } => self.handle_init(&message, node_id)?,
+            Payload::InitOk => {}
+            Payload::Echo { echo } => self.handle_echo(&message, echo)?,
+
+            Payload::EchoOk { .. } => {}
+        };
 
         Ok(())
     }
 }
 
 fn main() -> anyhow::Result<()> {
-    let mut node = EchoNode::new();
+    let stdout = std::io::stdout().lock();
+    let mut stdout_json_writter: Box<dyn MessageWritter<Message<Payload>>> =
+        Box::new(StdoutJsonWritter::new(stdout));
+
+    let mut node = EchoNode::new(&mut stdout_json_writter);
     main_loop::<Message<Payload>, _, Payload>(&mut node)
 }
