@@ -16,7 +16,7 @@
      --time-limit 30 \
      --rate 1000 \
      --nemesis partition \
-     -- availability total
+     --availability total
 ```
 
 3. Broadcast
@@ -47,3 +47,31 @@
     --time-limit 20 \
     --rate 1000
 ```
+
+6. Totally available transactions
+
+Read uncommitted
+
+```shell
+./maelstrom test -w txn-rw-register --bin ../../distributed_system_challenges/target/debug/totally_available_transactions \
+    --node-count 5 \
+    --time-limit 20 \
+    --rate 1000 \
+    --concurrency 2n \
+    --consistency-models read-uncommitted \
+    --availability total \
+    --nemesis partition
+```
+
+Read committed
+```shell
+./maelstrom test -w txn-rw-register --bin ../../distributed_system_challenges/target/debug/totally_available_transactions \
+    --node-count 5 \
+    --time-limit 20 \
+    --rate 1000 \
+    --concurrency 2n \
+    --consistency-models read-committed \
+    --availability total \
+    --nemesis partition
+```
+
