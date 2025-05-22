@@ -75,3 +75,13 @@ Read committed
     --nemesis partition
 ```
 
+7. Raft
+
+Step 1: Key-Value Store transfition
+```shell
+./maelstrom test -w lin-kv --bin ../../distributed_system_challenges/target/debug/raft \
+    --time-limit 10 \
+    --rate 10 \
+    --node-count 1 \
+    --concurrency 2n
+```
