@@ -1,9 +1,29 @@
 use anyhow::{Context, bail};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, Serializer, de::DeserializeOwned};
 use serde_json::Value;
 use std::sync::mpsc::Sender;
 
+pub mod raft;
 pub mod writters;
+
+#[derive(Debug, Clone, Deserialize)]
+pub enum Error {
+    KeyDoesNotExist,
+    PreconditionFailed,
+}
+
+impl Serialize for Error {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let error_code = match self {
+            Error::KeyDoesNotExist => 20,
+            Error::PreconditionFailed => 22,
+        };
+        serializer.serialize_u64(error_code as u64)
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message<Payload> {

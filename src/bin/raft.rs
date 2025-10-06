@@ -3,34 +3,18 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use chrono::Utc;
 use distributed_system_challenges::{
-    Body, Message, Node, main_loop,
+    Body, Error, Message, Node, main_loop,
+    raft::RaftState,
     writters::{MessageWritter, StdoutJsonWritter},
 };
-use serde::{Deserialize, Serialize, Serializer};
+use rand::Rng;
+use serde::{Deserialize, Serialize};
 
 type NodeId = String;
 type KeyId = usize;
 type LogValue = usize;
-
-#[derive(Debug, Clone, Deserialize)]
-enum Error {
-    KetDoesNotExist,
-    PreconditionFailed,
-}
-
-impl Serialize for Error {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let error_code = match self {
-            Error::KetDoesNotExist => 20,
-            Error::PreconditionFailed => 22,
-        };
-        serializer.serialize_u64(error_code as u64)
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -62,9 +46,21 @@ enum Payload {
         code: Error,
         text: String,
     },
+    BecomeCandidateTriggered,
+    RequestVote {
+        term: usize,
+        last_log_index: usize,
+        last_log_term: usize,
+    },
+    RequestVoteReply {
+        term_requested: usize,
+        term_voted: usize,
+        vote_granted: bool,
+    },
 }
 
 struct RaftNode<'a> {
+    state: Arc<Mutex<RaftState>>,
     writter: &'a mut Box<dyn MessageWritter<Message<Payload>>>,
     node_id: NodeId,
     message_id: usize,
@@ -76,7 +72,14 @@ struct RaftNode<'a> {
 impl<'a> RaftNode<'a> {
     fn new(writter: &'a mut Box<dyn MessageWritter<Message<Payload>>>) -> Self {
         let node_id = "uninit";
+        let election_timeout = std::time::Duration::from_secs(1);
+
         Self {
+            state: Arc::new(Mutex::new(RaftState::new(
+                node_id.to_owned(),
+                0,
+                election_timeout,
+            ))),
             node_id: node_id.to_owned(),
             message_id: 0,
             cluster: HashSet::new(),
@@ -116,8 +119,23 @@ impl<'a> RaftNode<'a> {
         let mut cluster = nodes.clone();
         cluster.insert(node_id.to_owned());
 
+        let majority = (node_ids.len() / 2) + 1;
+
+        eprintln!(
+            "{} | {} | Initializing with nodes: {:?}, majority: {}",
+            Utc::now().format("%H:%M:%S%.3f"),
+            self.node_id,
+            nodes,
+            majority
+        );
+
         self.neighbors = nodes;
         self.cluster = cluster;
+        self.state = Arc::new(Mutex::new(RaftState::new(
+            self.node_id.to_owned(),
+            majority,
+            std::time::Duration::from_secs(1),
+        )));
 
         let reply = Message::new(
             message.dest().to_owned(),
@@ -136,7 +154,7 @@ impl<'a> RaftNode<'a> {
         let payload = match value {
             Some(v) => Payload::ReadOk { value: v },
             None => Payload::Error {
-                code: Error::KetDoesNotExist,
+                code: Error::KeyDoesNotExist,
                 text: format!("Key {} not found", key),
             },
         };
@@ -195,7 +213,7 @@ impl<'a> RaftNode<'a> {
                 }
             }
             None => Payload::Error {
-                code: Error::KetDoesNotExist,
+                code: Error::KeyDoesNotExist,
                 text: format!("Key {} not found", key),
             },
         };
@@ -209,6 +227,92 @@ impl<'a> RaftNode<'a> {
         );
 
         self.send_message(&reply)
+    }
+
+    fn handle_request_vote(
+        &mut self,
+        message: &Message<Payload>,
+        term: usize,
+        last_log_index: usize,
+        last_log_term: usize,
+    ) -> anyhow::Result<()> {
+        eprintln!(
+            "{} | {} | Received request vote from {} for term {} with last log index {} and term {}",
+            Utc::now().format("%H:%M:%S%.3f"),
+            self.node_id,
+            message.src(),
+            term,
+            last_log_index,
+            last_log_term
+        );
+        let mut state = self.state.lock().unwrap();
+        let vote = state.emit_vote(
+            message.src().to_owned(),
+            term,
+            last_log_index,
+            last_log_term,
+        )?;
+
+        let payload = Payload::RequestVoteReply {
+            term_requested: term,
+            term_voted: vote.term,
+            vote_granted: vote.granted,
+        };
+
+        drop(state);
+
+        self.broadcast(&payload)
+    }
+
+    fn handle_request_vote_reply(
+        &mut self,
+        message: &Message<Payload>,
+        term_requested: usize,
+        term_voted: usize,
+        vote_granted: bool,
+    ) -> anyhow::Result<()> {
+        eprintln!(
+            "{} | {} | received request vote reply from {}: requested term {}, voted term {}, granted: {}",
+            Utc::now().format("%H:%M:%S%.3f"),
+            self.node_id,
+            message.src(),
+            term_requested,
+            term_voted,
+            vote_granted
+        );
+        let mut state = self.state.lock().unwrap();
+        state.collect_vote(
+            message.src().to_owned(),
+            term_requested,
+            term_voted,
+            vote_granted,
+        )
+    }
+
+    fn become_candidate(&mut self) -> anyhow::Result<()> {
+        let mut state = self.state.lock().unwrap();
+        let became_candidate = state.become_candidate()?;
+
+        if became_candidate {
+            eprintln!(
+                "{} | {} | became candidate in term {}. Requesting votes",
+                Utc::now().format("%H:%M:%S%.3f"),
+                self.node_id,
+                state.term()
+            );
+
+            let payload = Payload::RequestVote {
+                term: state.term(),
+                last_log_index: state.last_log_index(),
+                last_log_term: state.last_log_term(),
+            };
+
+            drop(state);
+
+            return self.broadcast(&payload);
+        }
+
+        Ok(())
     }
 
     fn broadcast(&mut self, payload: &Payload) -> anyhow::Result<()> {
@@ -229,7 +333,25 @@ impl<'a> RaftNode<'a> {
 }
 
 impl Node<Payload> for RaftNode<'_> {
-    fn init(&mut self, _tx: std::sync::mpsc::Sender<Message<Payload>>) -> anyhow::Result<()> {
+    fn init(&mut self, tx: std::sync::mpsc::Sender<Message<Payload>>) -> anyhow::Result<()> {
+        let node_id = self.node_id.clone();
+        let _ = std::thread::spawn(move || {
+            loop {
+                let random_millis = rand::rng().random_range(700..=1200);
+                std::thread::sleep(std::time::Duration::from_millis(random_millis));
+
+                let trigger_become_candidate = Message::<Payload>::new(
+                    node_id.clone(),
+                    node_id.clone(),
+                    Body::new(None, None, Payload::BecomeCandidateTriggered),
+                );
+
+                if tx.send(trigger_become_candidate).is_err() {
+                    break;
+                }
+            }
+        });
+
         Ok(())
     }
 
@@ -244,6 +366,22 @@ impl Node<Payload> for RaftNode<'_> {
             Payload::WriteOk => Ok(()),
             Payload::CasOk => Ok(()),
             Payload::Error { .. } => Ok(()),
+            Payload::BecomeCandidateTriggered => self.become_candidate(),
+            Payload::RequestVote {
+                term,
+                last_log_index,
+                last_log_term,
+            } => self.handle_request_vote(&message, *term, *last_log_index, *last_log_term),
+            Payload::RequestVoteReply {
+                term_requested,
+                term_voted,
+                vote_granted,
+            } => self.handle_request_vote_reply(
+                &message,
+                *term_requested,
+                *term_voted,
+                *vote_granted,
+            ),
         }
     }
 }
